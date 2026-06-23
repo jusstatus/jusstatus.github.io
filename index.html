@@ -91,7 +91,7 @@
   <div id="loading" style="display:none;">Cargando monitores…</div>
   <div class="grid" id="grid"></div>
 
-  <footer>Actualiza automáticamente cada 60s · Datos vía API pública de UptimeRobot</footer>
+  <footer>Actualiza automáticamente cada 60s · Poder Judicial Formosa - Año <span id="currentYear"></span></footer>
 </div>
 
 <!-- config.js no se versiona (ver .gitignore): contiene la API key real.
@@ -106,6 +106,8 @@
   const loading = $('loading');
   const lastUpdated = $('lastUpdated');
   const globalBanner = $('globalBanner');
+
+  $('currentYear').textContent = new Date().getFullYear();
 
   let refreshTimer = null;
 
