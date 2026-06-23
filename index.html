@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Estado de servicios</title>
+<style>
+  :root {
+    --bg: #0b0f17;
+    --card: #131a26;
+    --border: #232c3d;
+    --text: #e6e9ef;
+    --muted: #8b95a7;
+    --up: #22c55e;
+    --down: #ef4444;
+    --paused: #94a3b8;
+    --seems-down: #f59e0b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 32px 16px;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 24px; flex-wrap: wrap; gap: 8px; }
+  h1 { font-size: 1.5rem; margin: 0; }
+  #lastUpdated { color: var(--muted); font-size: 0.85rem; }
+  #error {
+    display: none;
+    background: #2a1212;
+    border: 1px solid #7f1d1d;
+    color: #fca5a5;
+    padding: 12px 16px;
+    border-radius: 8px;
+    margin-bottom: 16px;
+    font-size: 0.9rem;
+  }
+  .global-banner {
+    display: none;
+    padding: 14px 18px;
+    border-radius: 10px;
+    margin-bottom: 20px;
+    font-weight: 600;
+    text-align: center;
+  }
+  .global-banner.up { background: rgba(34,197,94,0.12); color: var(--up); border: 1px solid rgba(34,197,94,0.3); }
+  .global-banner.down { background: rgba(239,68,68,0.12); color: var(--down); border: 1px solid rgba(239,68,68,0.3); }
+  .grid { display: flex; flex-direction: column; gap: 10px; }
+  .monitor {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 18px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .monitor .left { display: flex; align-items: center; gap: 12px; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+  .dot.up { background: var(--up); box-shadow: 0 0 8px var(--up); }
+  .dot.down { background: var(--down); box-shadow: 0 0 8px var(--down); }
+  .dot.seems-down { background: var(--seems-down); box-shadow: 0 0 8px var(--seems-down); }
+  .dot.paused, .dot.pending { background: var(--paused); }
+  .monitor .name { font-weight: 600; }
+  .monitor .url { color: var(--muted); font-size: 0.8rem; }
+  .monitor .right { display: flex; align-items: center; gap: 18px; font-size: 0.85rem; color: var(--muted); }
+  .monitor .status-label { font-weight: 600; }
+  .status-label.up { color: var(--up); }
+  .status-label.down { color: var(--down); }
+  .status-label.seems-down { color: var(--seems-down); }
+  .status-label.paused, .status-label.pending { color: var(--paused); }
+  .uptime b { color: var(--text); }
+  #loading { color: var(--muted); text-align: center; padding: 40px 0; }
+  footer { text-align: center; color: var(--muted); font-size: 0.75rem; margin-top: 32px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Estado de servicios</h1>
+    <span id="lastUpdated"></span>
+  </header>
+
+  <div id="error"></div>
+  <div class="global-banner" id="globalBanner"></div>
+  <div id="loading" style="display:none;">Cargando monitores…</div>
+  <div class="grid" id="grid"></div>
+
+  <footer>Actualiza automáticamente cada 60s · Datos vía API pública de UptimeRobot</footer>
+</div>
+
+<!-- config.js no se versiona (ver .gitignore): contiene la API key real.
+     Editalo a partir de config.example.js. Debe cargarse antes que este script. -->
+<script src="config.js"></script>
+<script>
+  const REFRESH_MS = 60000;
+
+  const $ = (id) => document.getElementById(id);
+  const grid = $('grid');
+  const errorBox = $('error');
+  const loading = $('loading');
+  const lastUpdated = $('lastUpdated');
+  const globalBanner = $('globalBanner');
+
+  let refreshTimer = null;
+
+  const STATUS_MAP = {
+    0: { label: 'Pausado', cls: 'paused' },
+    1: { label: 'Sin chequear', cls: 'pending' },
+    2: { label: 'Activo', cls: 'up' },
+    8: { label: 'Posible caída', cls: 'seems-down' },
+    9: { label: 'Caído', cls: 'down' },
+  };
+
+  function showError(message) {
+    errorBox.textContent = message;
+    errorBox.style.display = message ? 'block' : 'none';
+  }
+
+  async function fetchMonitors(apiKey) {
+    const res = await fetch('https://api.uptimerobot.com/v2/getMonitors', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        api_key: apiKey,
+        format: 'json',
+        custom_uptime_ratios: '1-7-30',
+        response_times: '0',
+        logs: '0',
+      }),
+    });
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} al consultar la API de UptimeRobot`);
+    }
+
+    const data = await res.json();
+
+    if (data.stat !== 'ok') {
+      const msg = data.error?.message || 'La API de UptimeRobot devolvió un error';
+      throw new Error(msg);
+    }
+
+    return data.monitors || [];
+  }
+
+  function renderMonitors(monitors) {
+    grid.innerHTML = '';
+
+    if (monitors.length === 0) {
+      grid.innerHTML = '<div id="loading">No se encontraron monitores en esta cuenta.</div>';
+      globalBanner.style.display = 'none';
+      return;
+    }
+
+    const anyDown = monitors.some((m) => m.status === 9 || m.status === 8);
+    globalBanner.style.display = 'block';
+    globalBanner.className = 'global-banner ' + (anyDown ? 'down' : 'up');
+    globalBanner.textContent = anyDown
+      ? 'Uno o más servicios presentan problemas'
+      : 'Todos los servicios operan con normalidad';
+
+    monitors.forEach((m) => {
+      const info = STATUS_MAP[m.status] || { label: 'Desconocido', cls: 'pending' };
+      const ratios = (m.custom_uptime_ratio || '').split('-');
+      const [r1, r7, r30] = [ratios[0] || '–', ratios[1] || '–', ratios[2] || '–'];
+
+      const el = document.createElement('div');
+      el.className = 'monitor';
+      el.innerHTML = `
+        <div class="left">
+          <span class="dot ${info.cls}"></span>
+          <div>
+            <div class="name">${escapeHtml(m.friendly_name)}</div>
+            <div class="url">${escapeHtml(m.url || '')}</div>
+          </div>
+        </div>
+        <div class="right">
+          <span class="uptime">24h <b>${r1}%</b></span>
+          <span class="uptime">7d <b>${r7}%</b></span>
+          <span class="uptime">30d <b>${r30}%</b></span>
+          <span class="status-label ${info.cls}">${info.label}</span>
+        </div>
+      `;
+      grid.appendChild(el);
+    });
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str ?? '';
+    return div.innerHTML;
+  }
+
+  async function refresh(apiKey) {
+    loading.style.display = grid.children.length ? 'none' : 'block';
+    showError('');
+    try {
+      const monitors = await fetchMonitors(apiKey);
+      renderMonitors(monitors);
+      lastUpdated.textContent = 'Última actualización: ' + new Date().toLocaleTimeString();
+    } catch (err) {
+      showError(err.message || 'No se pudo obtener el estado de los monitores.');
+    } finally {
+      loading.style.display = 'none';
+    }
+  }
+
+  function start(apiKey) {
+    if (refreshTimer) clearInterval(refreshTimer);
+    refresh(apiKey);
+    refreshTimer = setInterval(() => refresh(apiKey), REFRESH_MS);
+  }
+
+  const apiKey = window.UPTIMEROBOT_CONFIG?.apiKey;
+
+  if (!apiKey || apiKey.includes('xxxxxxxx')) {
+    showError('Esta página todavía no fue configurada. Copiá config.example.js a config.js y completá tu API key.');
+  } else {
+    start(apiKey);
+  }
+</script>
+</body>
+</html>
